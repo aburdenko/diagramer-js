@@ -1,0 +1,11 @@
+{
+  "name": "diagramer-js",
+  "version": "1.0.0",
+  "description": "Google Slides diagram genrator with Apps Script frontend.",
+  "scripts": {
+    "watch": "clasp push --watch --force",
+    "push": "clasp push --force",
+    "resync": "echo 'Attempting to resync with remote...' && clasp pull --force && git checkout -- apps-script/ && echo 'Resync complete. Please try pushing again.'"
+  },
+  "author": "Alex Burdenko"
+}

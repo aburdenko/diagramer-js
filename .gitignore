@@ -1,0 +1,4 @@
+.venv/
+icons/
+service_account.json
+client_secrets.json

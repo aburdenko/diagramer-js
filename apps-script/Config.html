@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <base target="_top">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, Ubuntu, Cantarell, "Fira Sans", "Droid Sans", "Helvetica Neue", sans-serif;
+    }
+  </style>
+</head>
+<body class="p-4 bg-gray-100">
+
+  <div class="w-full">
+    <h1 class="text-xl font-bold text-gray-900 mb-4">Configuration</h1>
+
+    <div class="mb-4">
+      <label for="gcp-project-id" class="block text-sm font-medium text-gray-700 mb-2">GCP Project ID:</label>
+      <input type="text" id="gcp-project-id" class="w-full p-2 border border-gray-300 rounded-lg shadow-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
+    </div>
+
+    <div class="mb-6">
+      <label for="gcs-bucket" class="block text-sm font-medium text-gray-700 mb-2">Icon Map GCS Bucket:</label>
+      <input type="text" id="gcs-bucket" class="w-full p-2 border border-gray-300 rounded-lg shadow-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500" value="icon-map" placeholder="e.g., your-bucket-name">
+       <p class="text-xs text-gray-500 mt-1">The name of the GCS bucket containing the 'icon_map.json' file.</p>
+    </div>
+
+    <button id="save-btn" class="w-full bg-blue-600 text-white font-bold py-2 px-4 rounded-lg shadow-md hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2">
+      Save Configuration
+    </button>
+
+    <div id="message-box" class="hidden mt-4 p-3 rounded-lg">
+      <p><strong class="font-bold" id="message-title"></strong> <span id="message-text"></span></p>
+    </div>
+  </div>
+
+  <script>
+    // --- MOCK FOR TESTING OUTSIDE SLIDES ---
+    if (typeof google === 'undefined' || typeof google.script === 'undefined') {
+      console.warn("Running outside of Google Slides. Mocking 'google.script.run'.");
+      window.google = {
+        script: {
+          run: {
+            withSuccessHandler: function(handler) { this._successHandler = handler; return this; },
+            withFailureHandler: function(handler) { this._failureHandler = handler; return this; },
+            saveConfig: function(config) {
+              console.log("MOCK CALL: saveConfig", config);
+              if (this._successHandler) this._successHandler({ success: true, message: "Configuration saved! (Mock)" });
+            },
+            loadConfig: function() {
+              console.log("MOCK CALL: loadConfig");
+              if (this._successHandler) this._successHandler({ gcpProjectId: "mock_project_123", gcsBucket: "mock-bucket" });
+            }
+          }
+        }
+      };
+    }
+    // --- END MOCK ---
+  </script>
+
+  <script>
+    const saveBtn = document.getElementById('save-btn');
+    const gcpProjectIdInput = document.getElementById('gcp-project-id');
+    const gcsBucketInput = document.getElementById('gcs-bucket');
+    const messageBox = document.getElementById('message-box');
+    const messageTitle = document.getElementById('message-title');
+    const messageText = document.getElementById('message-text');
+
+    // Load config when the dialog opens
+    document.addEventListener('DOMContentLoaded', () => {
+      google.script.run
+        .withSuccessHandler(config => {
+          gcpProjectIdInput.value = config.gcpProjectId || '';
+          gcsBucketInput.value = config.gcsBucket || '';
+        })
+        .withFailureHandler(err => {
+          showMessage('Error', 'Could not load configuration: ' + err.message, true);
+        })
+        .loadConfig();
+    });
+
+    saveBtn.addEventListener('click', () => {
+      const config = {
+        gcpProjectId: gcpProjectIdInput.value,
+        gcsBucket: gcsBucketInput.value
+      };
+
+      if (!config.gcpProjectId || !config.gcsBucket) {
+        showMessage('Error', 'Please fill in all fields.', true);
+        return;
+      }
+      
+      saveBtn.disabled = true;
+      saveBtn.textContent = 'Saving...';
+
+      google.script.run
+        .withSuccessHandler(response => {
+          if (response.success) {
+            showMessage('Success!', response.message, false);
+             setTimeout(() => google.script.host.close(), 1500);
+          } else {
+            showMessage('Error', response.message, true);
+          }
+        })
+        .withFailureHandler(err => {
+          showMessage('Failed', err.message, true);
+        })
+        .saveConfig(config);
+        
+        saveBtn.disabled = false;
+        saveBtn.textContent = 'Save Configuration';
+    });
+
+    function showMessage(title, message, isError) {
+      messageTitle.textContent = title;
+      messageText.textContent = message;
+      messageBox.classList.remove('bg-red-100', 'border-red-400', 'text-red-700', 'bg-green-100', 'border-green-400', 'text-green-700', 'hidden');
+      if (isError) {
+        messageBox.classList.add('bg-red-100', 'border-red-400', 'text-red-700');
+      } else {
+        messageBox.classList.add('bg-green-100', 'border-green-400', 'text-green-700');
+      }
+    }
+  </script>
+</body>
+</html>

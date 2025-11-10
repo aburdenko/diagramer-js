@@ -1,0 +1,9 @@
+# This file tells clasp which files and directories to ignore when pushing.
+# It works just like a .gitignore file.
+
+# 1. Ignore the template file, as only the generated Sidebar.html should be pushed.
+Sidebar.template.html
+
+# 2. Explicitly UN-ignore the generated Sidebar.html file.
+# This ensures it gets pushed even though it's in the main .gitignore file.
+!Sidebar.html
