@@ -57,7 +57,15 @@
     </div>
   </div>
 
+  <div id="version-info" class="text-xs text-gray-500 mt-4 text-center"></div>
+
   <script>
+    window.addEventListener('load', () => {
+        google.script.run.withSuccessHandler(v => {
+            document.getElementById('version-info').textContent = `Version: ${v}`;
+        }).getScriptVersion();
+    });
+
     // --- MOCK FOR LOCAL TESTING ---
     if (typeof google === 'undefined' || typeof google.script === 'undefined') {
       console.warn("Mocking 'google.script.run'.");
@@ -65,7 +73,8 @@
             withSuccessHandler: function(h) { this._h = h; return this; },
             withFailureHandler: function(h) { return this; },
             generateDiagram: function(p, m) { setTimeout(() => this._h({ success: true, mermaidCode: m ? "graph LR\nA[Mock] --> B[Test]" : null, message: "Mock Success" }), 1000); },
-            renderMermaid: function(c) { setTimeout(() => this._h({ success: true, message: "Mock Render" }), 1000); }
+            renderMermaid: function(c) { setTimeout(() => this._h({ success: true, message: "Mock Render" }), 1000); },
+            getScriptVersion: function() { this._h("4.67"); }
       }}};
     }
 

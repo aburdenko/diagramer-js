@@ -2,7 +2,7 @@
 // ADD-ON BOILERPLATE
 //==================================================================
 
-const SCRIPT_VERSION = "4.64";
+const SCRIPT_VERSION = "4.67";
 const MODEL_ID = "gemini-2.5-flash"; 
 
 const FALLBACK_ICONS = {
@@ -42,6 +42,11 @@ function showSidebar() {
   }
   const html = HtmlService.createHtmlOutputFromFile('Sidebar.html').setTitle('Diagram Generator');
   SlidesApp.getUi().showSidebar(html);
+}
+
+function getScriptVersion() {
+    Logger.log(`Version: ${SCRIPT_VERSION}`);
+    return SCRIPT_VERSION;
 }
 
 //==================================================================
@@ -112,7 +117,7 @@ function getMermaidCode(userPrompt, gcpProjectId, iconMap) {
   }
 
   const availableIconsList = Object.entries(relevantIcons)
-    .map(([key, desc]) => `  "${key}": "${(desc || '').replace(/"/g, '\\"')}"`)
+    .map(([key, desc]) => `  "${key}": "${(desc || '').replace(/"/g, '\\"')}"`) // Corrected escaping for double quotes within the string
     .join(',\n');
 
   const systemPrompt = `
@@ -166,7 +171,7 @@ ${availableIconsList}
   // Standardize Mermaid by injecting :::icon_key
   for (const id in CURRENT_ICON_ASSIGNMENTS) {
       const icon = CURRENT_ICON_ASSIGNMENTS[id];
-      const regex = new RegExp(`(${id}\\s*\\[".+?"\\])`, 'g');
+      const regex = new RegExp(`(${id}\s*\[".+?"\])`, 'g');
       mermaidCode = mermaidCode.replace(regex, `$1:::${icon}`);
   }
 
@@ -194,7 +199,7 @@ function parseMermaid(mermaidCode) {
 
       if (!entitiesMap.has(id)) {
           entitiesMap.set(id, { id, label, icon });
-          Logger.log(`Parsed Entity: ${id}, Icon: ${icon}`);
+          Logger.log(`Parsed Entity: ${id}, Label: "${label}", Icon: ${icon}`);
       }
   }
 
