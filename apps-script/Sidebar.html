@@ -2,6 +2,7 @@
 <html>
 <head>
   <base target="_top">
+  <!-- Using Tailwind CSS CDN for styling -->
   <script src="https://cdn.tailwindcss.com"></script>
   <style>
     body {
@@ -32,8 +33,13 @@
       <textarea id="prompt" rows="5" class="w-full p-2 border border-gray-300 rounded-lg shadow-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 resize-y" placeholder="e.g., A mobile app sends data to a Cloud Function..."></textarea>
     </div>
 
+    <div class="mb-4">
+      <label for="model-select" class="block text-sm font-medium text-gray-700 mb-2">Enter Model Name:</label>
+      <input type="text" id="model-select" class="w-full p-2 border border-gray-300 rounded-lg shadow-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500" placeholder="e.g., gemini-2.5-flash">
+    </div>
+
     <div class="mb-4 flex items-center">
-      <input id="show-markup" type="checkbox" class="w-4 h-4 text-blue-600 bg-gray-100 border-gray-300 rounded focus:ring-blue-500">
+      <input id="show-markup" type="checkbox" checked class="w-4 h-4 text-blue-600 bg-gray-100 border-gray-300 rounded focus:ring-blue-500">
       <label for="show-markup" class="ml-2 text-sm font-medium text-gray-900">Show Mermaid Markup (Edit before render)</label>
     </div>
 
@@ -42,7 +48,7 @@
       <div id="gen-loader" class="hidden loader ml-3" style="width: 20px; height: 20px; border-width: 3px;"></div>
     </button>
 
-    <div id="markup-container" class="hidden mt-6 border-t pt-6 border-gray-300">
+    <div id="markup-container" class="mt-6 border-t pt-6 border-gray-300">
        <label for="mermaid-markup" class="block text-sm font-medium text-gray-700 mb-2">Mermaid Markup:</label>
        <textarea id="mermaid-markup" rows="6" class="w-full p-2 border border-gray-300 rounded-lg shadow-sm focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 font-mono text-xs resize-y" spellcheck="false"></textarea>
        
@@ -60,24 +66,8 @@
   <div id="version-info" class="text-xs text-gray-500 mt-4 text-center"></div>
 
   <script>
-    window.addEventListener('load', () => {
-        google.script.run.withSuccessHandler(v => {
-            document.getElementById('version-info').textContent = `Version: ${v}`;
-        }).getScriptVersion();
-    });
-
-    // --- MOCK FOR LOCAL TESTING ---
-    if (typeof google === 'undefined' || typeof google.script === 'undefined') {
-      console.warn("Mocking 'google.script.run'.");
-      window.google = { script: { run: {
-            withSuccessHandler: function(h) { this._h = h; return this; },
-            withFailureHandler: function(h) { return this; },
-            generateDiagram: function(p, m) { setTimeout(() => this._h({ success: true, mermaidCode: m ? "graph LR\nA[Mock] --> B[Test]" : null, message: "Mock Success" }), 1000); },
-            renderMermaid: function(c) { setTimeout(() => this._h({ success: true, message: "Mock Render" }), 1000); },
-            getScriptVersion: function() { this._h("4.67"); }
-      }}};
-    }
-
+    // --- Global state and element references ---
+    let selectedModelId = '';
     const promptInput = document.getElementById('prompt');
     const showMarkupCb = document.getElementById('show-markup');
     const generateBtn = document.getElementById('generate-btn');
@@ -92,26 +82,78 @@
     const messageTitle = document.getElementById('message-title');
     const messageText = document.getElementById('message-text');
 
+    // --- Utility Functions ---
+    function setLoading(isLoading, type) {
+        if (type === 'gen') {
+            generateBtn.disabled = isLoading;
+            genBtnText.classList.toggle('hidden', isLoading);
+            genLoader.classList.toggle('hidden', !isLoading);
+        } else if (type === 'ren') {
+            renderBtn.disabled = isLoading;
+            renBtnText.classList.toggle('hidden', isLoading);
+            renLoader.classList.toggle('hidden', !isLoading);
+        }
+    }
+
+    function showMessage(title, text, isError) {
+        messageBox.classList.remove('hidden');
+        messageBox.classList.remove('bg-green-100', 'bg-red-100');
+        messageBox.classList.add(isError ? 'bg-red-100' : 'bg-green-100');
+        messageTitle.textContent = title + ': ';
+        messageText.textContent = text;
+    }
+
+    function hideMessage() {
+        messageBox.classList.add('hidden');
+    }
+
+    // --- Event Handlers ---
+    window.addEventListener('load', () => {
+        google.script.run.withSuccessHandler(v => {
+            document.getElementById('version-info').textContent = `Version: ${v}`;
+        }).withFailureHandler(onFailure).getScriptVersion();
+
+        // Load user config
+        google.script.run.withSuccessHandler(config => {
+            // Set default if no config saved
+            selectedModelId = config.modelId || 'gemini-2.5-flash'; 
+            document.getElementById('model-select').value = selectedModelId;
+        }).loadConfig();
+    });
+
+    document.getElementById('model-select').addEventListener('input', (e) => {
+        selectedModelId = e.target.value;
+        google.script.run.saveConfig({ modelId: selectedModelId });
+    });
+
     showMarkupCb.addEventListener('change', () => markupContainer.classList.toggle('hidden', !showMarkupCb.checked));
 
     generateBtn.addEventListener('click', () => {
       if (!promptInput.value.trim()) return showMessage('Error', 'Please enter a prompt.', true);
       setLoading(true, 'gen'); hideMessage();
-      google.script.run.withSuccessHandler(onGenerateSuccess).withFailureHandler(onFailure).generateDiagram(promptInput.value.trim(), showMarkupCb.checked);
+      google.script.run.withSuccessHandler(onGenerateSuccess).withFailureHandler(onFailure)
+        .generateDiagram(promptInput.value.trim(), selectedModelId, showMarkupCb.checked);
     });
 
     renderBtn.addEventListener('click', () => {
         if (!markupInput.value.trim()) return showMessage('Error', 'Please enter Mermaid markup.', true);
         setLoading(true, 'ren'); hideMessage();
-        google.script.run.withSuccessHandler(onRenderSuccess).withFailureHandler(onFailure).renderMermaid(markupInput.value.trim());
+        google.script.run.withSuccessHandler(onRenderSuccess).withFailureHandler(onFailure)
+          .renderMermaid(markupInput.value.trim());
     });
+
+    // --- Callback Functions ---
 
     function onGenerateSuccess(result) {
       setLoading(false, 'gen');
       if (!result || !result.success) return showMessage('Error', result ? result.message : 'Unknown error.', true);
       if (result.mermaidCode) {
           markupInput.value = result.mermaidCode;
-          if (!showMarkupCb.checked) { showMarkupCb.checked = true; markupContainer.classList.remove('hidden'); }
+          // Ensure container is visible if markup is returned
+          if (showMarkupCb.checked === false) { 
+            showMarkupCb.checked = true; 
+            markupContainer.classList.remove('hidden'); 
+          }
           showMessage('Ready', 'Markup generated. Edit and click "Render Slide".', false);
       } else {
           showMessage('Success', result.message, false);
@@ -120,26 +162,17 @@
 
     function onRenderSuccess(result) {
         setLoading(false, 'ren');
+        // NOTE: Actual image insertion into the document would happen here in a full implementation,
+        // likely using another google.script.run call to a server-side function that
+        // uses the Slides/Docs API.
         showMessage(result.success ? 'Success' : 'Render Failed', result.message, !result.success);
     }
 
     function onFailure(err) {
-      setLoading(false, 'gen'); setLoading(false, 'ren');
-      showMessage('System Error', err.message || err, true);
+      setLoading(false, 'gen'); 
+      setLoading(false, 'ren');
+      showMessage('Script Error', `An AppScript error occurred: ${err.message || 'Unknown error'}`, true);
     }
-
-    function setLoading(isLoading, type) {
-        generateBtn.disabled = renderBtn.disabled = isLoading;
-        if (type === 'gen') { genLoader.classList.toggle('hidden', !isLoading); genBtnText.textContent = isLoading ? 'Generating...' : 'Generate'; }
-        else if (type === 'ren') { renLoader.classList.toggle('hidden', !isLoading); renBtnText.textContent = isLoading ? 'Rendering...' : 'Render Slide'; }
-    }
-
-    function showMessage(title, msg, isError) {
-      messageTitle.textContent = title; messageText.textContent = msg;
-      messageBox.className = `mt-4 p-3 rounded-lg text-sm ${isError ? 'bg-red-100 text-red-700 border border-red-200' : 'bg-green-100 text-green-800 border border-green-200'}`;
-      messageBox.classList.remove('hidden');
-    }
-    function hideMessage() { messageBox.classList.add('hidden'); }
   </script>
 </body>
 </html>

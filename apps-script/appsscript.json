@@ -11,6 +11,12 @@
     "https://www.googleapis.com/auth/script.storage",
     "https://www.googleapis.com/auth/cloud-platform",
     "https://www.googleapis.com/auth/script.external_request",
-    "https://www.googleapis.com/auth/userinfo.email"
-  ]
+    "https://www.googleapis.com/auth/userinfo.email",
+    "https://www.googleapis.com/auth/cloud-platform",    
+    "https://www.googleapis.com/auth/script.scriptapp"
+    
+  ],
+  "executionApi": {
+    "access": "ANYONE"
+  }
 }
