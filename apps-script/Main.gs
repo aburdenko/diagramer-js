@@ -2,22 +2,10 @@
 // ADD-ON BOILERPLATE
 //==================================================================
 
-// Public map requested
-const ICON_MAP_URL = "https://storage.googleapis.com/icon-map/icon_map.json"; 
-
-const FALLBACK_ICONS = {
-    GENERIC: "https://www.gstatic.com/images/branding/product/2x/google_cloud_48dp.png",
-    COMPUTE: "https://fonts.gstatic.com/s/i/productlogos/compute_engine/v8/web-48dp/logo_compute_engine_color_2x_web_48dp.png",
-    STORAGE: "https://fonts.gstatic.com/s/i/productlogos/cloud_storage/v8/web-48dp/logo_cloud_storage_color_2x_web_48dp.png",
-    DATABASE: "https://fonts.gstatic.com/s/i/productlogos/cloud_sql/v8/web-48dp/logo_cloud_sql_color_2x_web_48dp.png",
-    USER: "https://fonts.gstatic.com/s/i/googlematerialicons/person/v10/grey600-48dp/1x/gm_person_grey600_48dp.png"
-};
-
-const SCRIPT_VERSION = "5.5.0"; // Complete parser rewrite for stability.
+const SCRIPT_VERSION = "8.2.0"; // Final stable version with smaller cards
 
 function onOpen(e) {
-  const ui = SlidesApp.getUi();
-  const menu = ui.createMenu('Diagram Generator');
+  const menu = SlidesApp.getUi().createMenu('Diagram Generator');
   if (e && e.authMode == ScriptApp.AuthMode.NONE) {
     menu.addItem('Authorize Script', 'showSidebar');
   } else {
@@ -28,27 +16,24 @@ function onOpen(e) {
   menu.addToUi();
 }
 
-function getOAuthToken() { return ScriptApp.getOAuthToken(); }
+function showSidebar() {
+  const props = PropertiesService.getUserProperties();
+  if (!props.getProperty('GCP_PROJECT_ID')) {
+    SlidesApp.getUi().alert('Configuration required. Please set your Google Cloud Project ID via the "Configure..." menu.');
+    showConfigDialog();
+    return;
+  }
+  const html = HtmlService.createHtmlOutputFromFile('Sidebar.html').setTitle('Diagram Generator ' + SCRIPT_VERSION);
+  SlidesApp.getUi().showSidebar(html);
+}
 
 function showConfigDialog() {
   const html = HtmlService.createHtmlOutputFromFile('Config.html').setTitle('Configuration').setWidth(400).setHeight(250);
   SlidesApp.getUi().showModalDialog(html, 'Configure API Keys');
 }
 
-function showSidebar() {
-  const props = PropertiesService.getUserProperties();
-  if (!props.getProperty('GCP_PROJECT_ID')) {
-    SlidesApp.getUi().alert('Configuration required (Project ID).');
-    showConfigDialog();
-    return;
-  }
-  const html = HtmlService.createHtmlOutputFromFile('Sidebar.html').setTitle('Diagram Generator');
-  SlidesApp.getUi().showSidebar(html);
-}
-
-function getScriptVersion() {
-    return SCRIPT_VERSION;
-}
+function getOAuthToken() { return ScriptApp.getOAuthToken(); }
+function getScriptVersion() { return SCRIPT_VERSION; }
 
 //==================================================================
 // CONFIGURATION
@@ -64,199 +49,173 @@ function saveConfig(config) {
 
 function loadConfig() {
   const props = PropertiesService.getUserProperties();
-  return { gcpProjectId: props.getProperty('GCP_PROJECT_ID') || '',
-           modelId: props.getProperty('SELECTED_MODEL') || 'gemini-1.5-flash-latest' };
+  return {
+    gcpProjectId: props.getProperty('GCP_PROJECT_ID') || '',
+    modelId: props.getProperty('SELECTED_MODEL') || 'gemini-2.5-flash',
+    lastPrompt: props.getProperty('LAST_PROMPT') || ''
+  };
 }
 
 //==================================================================
 // CORE LOGIC
 //==================================================================
 
+let CURRENT_ICON_ASSIGNMENTS = {};
+const ICON_MAP_URL = "https://storage.googleapis.com/icon-map/icon_map.json";
+
+const FALLBACK_ICONS = {
+    GENERIC: "https://www.gstatic.com/images/branding/product/2x/google_cloud_48dp.png",
+    USER: "https://fonts.gstatic.com/s/i/googlematerialicons/person/v10/grey600-48dp/1x/gm_person_grey600_48dp.png"
+};
+
+/**
+ * Fetches the master icon map from a public GCS bucket. Caching is removed due to size limits.
+ */
 function getIconMap() {
-  const cacheKey = 'ICON_MAP_PUBLIC_V1';
-  const cache = CacheService.getScriptCache();
-  let cachedMap = cache.get(cacheKey);
-  if (cachedMap) return JSON.parse(cachedMap);
   try {
+    Logger.log('Fetching icon map from GCS.');
     const resp = UrlFetchApp.fetch(ICON_MAP_URL, { muteHttpExceptions: true });
-    if (resp.getResponseCode() !== 200) throw new Error("Map fetch failed.");
+    if (resp.getResponseCode() !== 200) {
+      throw new Error(`Map fetch failed with code: ${resp.getResponseCode()}`);
+    }
     const mapJson = resp.getContentText();
-    try { cache.put(cacheKey, mapJson, 3600); } catch (e) {}
     return JSON.parse(mapJson);
   } catch (e) {
-    Logger.log("Error getting icon map: " + e.message);
+    Logger.log(`Error getting icon map: ${e.message}. Returning empty map.`);
     return {};
   }
 }
 
-let CURRENT_ICON_ASSIGNMENTS = {};
-
+/**
+ * Calls the Gemini API to get Mermaid code and icon suggestions for a user prompt.
+ */
 function getMermaidCode(userPrompt, gcpProjectId, modelId, iconMap) {
   Logger.log(`getMermaidCode START: modelId=${modelId}, projectId=${gcpProjectId}`);
   const region = "us-central1";
   const apiUrl = `https://${region}-aiplatform.googleapis.com/v1/projects/${gcpProjectId}/locations/${region}/publishers/google/models/${modelId}:generateContent`;
-  // Filter icons to fit in context window
-  const mapEntries = Object.entries(iconMap);
-  const limitedEntries = mapEntries.length > 1500 ? mapEntries.slice(0, 1500) : mapEntries;
   
-  const promptKeywords = userPrompt.toLowerCase().split(/\W+/).filter(w => w.length > 3);
+  const prioritizedIcons = ['function', 'run', 'compute', 'storage', 'sql', 'bigquery', 'vertex', 'gemini', 'pubsub', 'dataflow', 'spanner', 'bucket', 'api', 'mobile', 'smartphone', 'gateway', 'user', 'database'];
   const relevantIcons = {};
-  
-  // Prioritize common cloud services
-  ['function', 'run', 'compute', 'storage', 'sql', 'bigquery', 'vertex', 'gemini', 'pubsub', 'dataflow', 'spanner', 'bucket', 'api'].forEach(k => {
-     for(const [key, val] of mapEntries) {
-         if (key.toLowerCase().includes(k) && !relevantIcons[key]) relevantIcons[key] = val.name || val.description;
-     }
-  });
-  // Add keyword matches
-  let count = Object.keys(relevantIcons).length;
-  for (const [key, val] of limitedEntries) {
-      if (count >= 400) break; 
-      if (!relevantIcons[key]) {
-           const desc = (val.description || val.name || '').toLowerCase();
-           if (promptKeywords.some(w => w.length > 3 && (key.includes(w) || desc.includes(w)))) {
-               relevantIcons[key] = val.name || val.description;
-               count++;
-           }
+  for (const key in iconMap) {
+      if (prioritizedIcons.some(p => key.includes(p))) {
+        relevantIcons[key] = iconMap[key].name || iconMap[key].description || '';
       }
   }
-  const availableIconsList = Object.entries(relevantIcons)
-    .map(([key, desc]) => `  "${key}": "${(desc || '').replace(/"/g, '\\"')}"`) 
-    .join(',\n');
 
-  const systemPrompt = `
-You are a Google Cloud architecture diagram assistant.
-1. Analyze the user request to identify components.
-2. Select the MOST ACCURATE icon key for each component from the 'Available Icons'.
-3. Output Mermaid JS code.
-
-Output JSON with two keys:
-- "icon_map_suggestions": Object mapping Entity ID -> Icon Key.
-- "mermaid_code": standard Mermaid graph LR.
-    - IDs must be simple (e.g., A, B, User, DB).
-    - Labels must be the functional role (e.g., "Data Warehouse", "Ingestion").
-    - DO NOT put the product name in the Label; the Icon Key handles that.
-    - Structure: NodeID["Functional Label"]
-
-Available Icons:
-{
-${availableIconsList}
-}
-`;
+  const systemPrompt = `You are a Google Cloud architecture diagram assistant. Analyze the user request to identify components. Select the MOST ACCURATE icon key for each component from the 'Available Icons'. Output JSON with two keys: "icon_map_suggestions" (an object mapping Entity ID -> Icon Key) and "mermaid_code" (standard Mermaid graph LR syntax). Use simple IDs (e.g., User, DB, MobileApp), and put functional roles in labels (e.g., "Data Warehouse"). Do not put product names in labels. Structure: NodeID["Functional Label"]. Available Icons:
+{${JSON.stringify(relevantIcons, null, 2)}}`;
 
   const payload = {
     "system_instruction": { "parts": [{ "text": systemPrompt }] },
-    "generationConfig": { "responseMimeType": "application/json" },
+    "generationConfig": { "responseMimeType": "application/json", "temperature": 0.0, "seed": 42 },
     "contents": [{ "role": "user", "parts": [{ "text": userPrompt }] }]
   };
-  const options = {
-    'method': 'post',
-    'contentType': 'application/json',
-    'payload': JSON.stringify(payload),
-    'headers': { 'Authorization': 'Bearer ' + ScriptApp.getOAuthToken() },
-    'muteHttpExceptions': true
-  };
+  const options = { method: 'post', contentType: 'application/json', payload: JSON.stringify(payload), headers: { 'Authorization': 'Bearer ' + getOAuthToken() }, muteHttpExceptions: true };
 
   Logger.log(`Fetching Mermaid code from Gemini API at: ${apiUrl}`);
   const response = UrlFetchApp.fetch(apiUrl, options);
-  const responseCode = response.getResponseCode();
   const responseText = response.getContentText();
-
-  if (responseCode !== 200) {
-    Logger.log(`Gemini API Error Response (Code ${responseCode}): ${responseText}`);
-    throw new Error(`Gemini API Error (${responseCode}): Check logs for full response.`);
+  if (response.getResponseCode() !== 200) {
+    Logger.log(`Gemini API Error Response: ${responseText}`);
+    throw new Error(`Gemini API Error (${response.getResponseCode()}): Check script logs.`);
   }
 
-  let parsedJson;
   try {
      const rawOutput = JSON.parse(responseText).candidates?.[0]?.content?.parts?.[0]?.text;
      Logger.log(`Raw JSON output from Gemini: ${rawOutput}`);
-     parsedJson = JSON.parse(rawOutput.replace(/```json|```/g, '').trim());
+     const parsedJson = JSON.parse(rawOutput.replace(/```json|```/g, '').trim());
+     CURRENT_ICON_ASSIGNMENTS = parsedJson.icon_map_suggestions || {};
+     return parsedJson.mermaid_code || "";
   } catch (e) {
      Logger.log(`Failed to parse JSON from Gemini. Raw text was: ${responseText}`);
      throw new Error("Invalid JSON response from Gemini. Check logs for details.");
   }
-
-  CURRENT_ICON_ASSIGNMENTS = parsedJson.icon_map_suggestions || {};
-  const mermaidCode = parsedJson.mermaid_code || "";
-  return mermaidCode.replace(/```mermaid|```/g, '').trim();
 }
 
+/**
+ * Parses Mermaid code into a structured format of entities and connections.
+ */
 function parseMermaid(mermaidCode) {
-  Logger.log('Parsing Mermaid:\n' + mermaidCode);
-  const entitiesMap = new Map();
-  const connections = [];
+    Logger.log('Parsing Mermaid:\n' + mermaidCode);
+    const entitiesMap = new Map();
+    const connections = [];
 
-  // Regex for nodes: ID["Label"]:::icon OR ID[Label]:::icon OR ID:::icon OR ID
-  const nodeDefinitionRegex = /(\w+)(?:\["([^"]*)"\])?(?:::(\w+))?/g;
-  let remainingMermaidCode = mermaidCode;
+    const parseNodeStr = (nodeStr) => {
+        if (!nodeStr) return null;
+        const s = nodeStr.trim();
+        let match = s.match(/^(\w+)(?:["']([^"']*)["'])(?::::(\w+))?$/);
+        if (!match) {
+            match = s.match(/^(\w+)(?:\s*"([^"]*)")?(?::::(\w+))?$/);
+        }
+        if (!match) {
+            match = s.match(/^(\w+)(?::::(\w+))?$/);
+        }
+        if (!match) return null;
+        
+        const id = match[1];
+        if (['graph', 'LR', 'TD'].includes(id)) return null;
 
-  // First pass: extract all explicit node definitions
-  let match;
-  // Use a temporary array to store definitions to process after regex.exec loop
-  const tempNodeDefinitions = [];
-  while ((match = nodeDefinitionRegex.exec(mermaidCode)) !== null) {
-      tempNodeDefinitions.push({
-          fullMatch: match[0],
-          id: match[1],
-          label: match[2],
-          icon: match[3]
-      });
-  }
+        if (!entitiesMap.has(id)) {
+            const label = match[2] || id;
+            const icon = match[3] || CURRENT_ICON_ASSIGNMENTS[id] || 'default';
+            entitiesMap.set(id, { id, label, icon });
+             Logger.log(`Parsed Node: ID=${id}, Label=${label}, Icon=${icon}`);
+        }
+        return id;
+    };
 
-  // Process extracted node definitions and clean mermaid code
-  for (const nodeDef of tempNodeDefinitions) {
-      const id = nodeDef.id;
-      if (['graph','LR','TD'].includes(id)) continue; // Skip graph definition keywords
-      
-      const label = nodeDef.label || id; // If no label, use ID
-      const icon = nodeDef.icon || CURRENT_ICON_ASSIGNMENTS[id] || 'default';
-      
-      if (!entitiesMap.has(id)) {
-          entitiesMap.set(id, { id, label, icon });
-          Logger.log(`Parsed explicit node: ${id}, Label: "${label}", Icon: "${icon}"`);
-      }
-      // Replace only the first occurrence for now; further logic might be needed for complex cases
-      remainingMermaidCode = remainingMermaidCode.replace(nodeDef.fullMatch, id);
-  }
+    const lines = mermaidCode.split('\n');
+    for (const line of lines) {
+        const trimmedLine = line.trim();
+        if (!trimmedLine || trimmedLine.startsWith('graph')) continue;
 
+        const arrowMatch = trimmedLine.match(/--\s*(.*)\s*-->/);
+        if (arrowMatch) {
+            const fromStr = trimmedLine.substring(0, arrowMatch.index);
+            const toStr = trimmedLine.substring(arrowMatch.index + arrowMatch[0].length);
+            const labelContent = arrowMatch[1].trim();
+            const label = (labelContent.startsWith('"') && labelContent.endsWith('"')) ? labelContent.substring(1, labelContent.length - 1).trim() : labelContent;
+            
+            const fromId = parseNodeStr(fromStr);
+            const toId = parseNodeStr(toStr);
 
-  // Second pass: Parse connections from the processed code
-  // The processed code should now mostly contain only IDs and connection arrows/labels
-  // This regex looks for: ID --"label"--> ID, ID --> ID, ID -- ID
-  const connectionRegex = /(\w+)\s*(?:--\s*"?([^"]*)"?\s*--|\s*--|\s*-->|\s*-+\s*)\s*(\w+)/g;
+            if (fromId && toId) {
+                connections.push({ from: fromId, to: toId, label: label });
+                Logger.log(`Parsed Connection: ${fromId} --"${label}"--> ${toId}`);
+            }
+        } else {
+            parseNodeStr(trimmedLine);
+        }
+    }
 
-  while ((match = connectionRegex.exec(remainingMermaidCode)) !== null) {
-      const from = match[1];
-      const label = match[2] || ''; // Connection label if present (from the group capturing between --"label"-- or --label--)
-      const to = match[3];
+    for (const node of entitiesMap.values()) {
+        if (node.icon === 'default') {
+            const lowerId = node.id.toLowerCase();
+            const lowerLabel = node.label.toLowerCase();
+            let newIcon = null;
+            if (lowerId.includes('mobile') || lowerLabel.includes('mobile')) newIcon = 'smartphone';
+            else if (lowerId.includes('user') || lowerLabel.includes('user')) newIcon = 'person';
+            else if (lowerId.includes('database') || lowerLabel.includes('db')) newIcon = 'database';
+            if (newIcon) {
+                node.icon = newIcon;
+                Logger.log(`Intelligent assignment: Node "${node.id}" icon updated to "${newIcon}".`);
+            }
+        }
+    }
 
-      connections.push({ from, to, label });
-      Logger.log(`Parsed connection: ${from} --"${label}"--> ${to}`);
-
-      // Ensure nodes involved in connections exist, even if not explicitly defined
-      if (!entitiesMap.has(from)) {
-        entitiesMap.set(from, { id: from, label: from, icon: 'default' });
-        Logger.log(`Added implicit node from connection (from): ${from}`);
-      }
-      if (!entitiesMap.has(to)) {
-        entitiesMap.set(to, { id: to, label: to, icon: 'default' });
-        Logger.log(`Added implicit node from connection (to): ${to}`);
-      }
-  }
-  
-  const entities = Array.from(entitiesMap.values());
-  Logger.log(`parseMermaid END: Found ${entities.length} entities and ${connections.length} connections.`);
-  return { entities, connections };
+    const entities = Array.from(entitiesMap.values());
+    Logger.log(`parseMermaid END: Found ${entities.length} entities and ${connections.length} connections.`);
+    return { entities, connections };
 }
 
 
+/**
+ * Calculates node positions for the diagram.
+ */
 function generateLayoutFromMermaid(parsedData, slideWidth, slideHeight) {
   Logger.log(`generateLayoutFromMermaid START: Generating layout for ${parsedData.entities.length} entities.`);
   const { entities, connections } = parsedData;
-  // CARD DIMENSIONS (Wider for Product Cards)
-  const CARD_W = 160;
-  const CARD_H = 70;
+  const CARD_W = 140, CARD_H = 60; // Using smaller cards
   
   const nodes = {};
   entities.forEach(e => nodes[e.id] = { ...e, children: [], parents: [], level: 0, x:0, y:0, width: CARD_W, height: CARD_H });
@@ -268,15 +227,14 @@ function generateLayoutFromMermaid(parsedData, slideWidth, slideHeight) {
     }
   });
 
-  // Simple hierarchical assignment
-  const MAX_LEVEL = 8;
+  // Simple hierarchical assignment from original version
   for (let i = 0; i < 20; i++) {
       let changed = false;
       for (const id in nodes) {
           const node = nodes[id];
           if (node.parents.length > 0) {
                const maxParentLevel = Math.max(...node.parents.map(pId => nodes[pId].level));
-               if (maxParentLevel + 1 > node.level && maxParentLevel + 1 <= MAX_LEVEL) {
+               if (maxParentLevel + 1 > node.level) {
                    node.level = maxParentLevel + 1;
                    changed = true;
                }
@@ -295,21 +253,25 @@ function generateLayoutFromMermaid(parsedData, slideWidth, slideHeight) {
   const numColumns = uniqueLevels.length;
 
   if (numColumns > 0) {
-      const hSpacing = 240; // Space between columns
-      const vSpacing = 110; // Space between rows
+      // Dynamic spacing calculation that fits to slide width
+      const availableWidth = slideWidth - 100; // 50px margin on each side
+      const hSpacing = (numColumns > 1) ? (availableWidth - (numColumns * CARD_W)) / (numColumns - 1) : 0;
       
-      const totalWidth = (numColumns * CARD_W) + ((numColumns - 1) * (hSpacing - CARD_W));
-      const startX = Math.max(50, (slideWidth - totalWidth) / 2);
+      const totalWidth = (numColumns * CARD_W) + Math.max(0, numColumns - 1) * hSpacing;
+      const startX = (slideWidth - totalWidth) / 2;
 
       uniqueLevels.forEach((level, colIndex) => {
           const levelNodes = levels[level];
-          const colHeight = (levelNodes.length * CARD_H) + ((levelNodes.length - 1) * (vSpacing - CARD_H));
-          let currentY = Math.max(50, (slideHeight - colHeight) / 2);
-          const currentX = startX + (colIndex * hSpacing);
+          const availableHeight = slideHeight - 100; // 50px margin
+          const vSpacing = (levelNodes.length > 1) ? (availableHeight - (levelNodes.length * CARD_H)) / (levelNodes.length - 1) : 0;
+          const totalHeight = (levelNodes.length * CARD_H) + Math.max(0, levelNodes.length - 1) * vSpacing;
+          let currentY = (slideHeight - totalHeight) / 2;
+          const currentX = startX + colIndex * (CARD_W + hSpacing);
+          
           levelNodes.forEach((node) => {
               node.x = currentX;
               node.y = currentY;
-              currentY += vSpacing;
+              currentY += CARD_H + vSpacing;
           });
       });
   }
@@ -318,33 +280,41 @@ function generateLayoutFromMermaid(parsedData, slideWidth, slideHeight) {
   return layoutResult;
 }
 
-function drawNode(slide, node, iconUrl, productName) {
-    // 1. Background Card
+/**
+ * Gets the attachment points for a node.
+ */
+function getCardAttachmentPoints(node) {
+  const centerX = node.x + node.width / 2;
+  const centerY = node.y + node.height / 2;
+  return {
+    center: { x: centerX, y: centerY }, left: { x: node.x, y: centerY },
+    right: { x: node.x + node.width, y: centerY }, top: { x: centerX, y: node.y },
+    bottom: { x: centerX, y: node.y + node.height }
+  };
+}
+
+/**
+ * Draws a single node on the slide.
+ */
+function drawNode(slide, node, iconUrl) {
     const card = slide.insertShape(SlidesApp.ShapeType.ROUND_RECTANGLE, node.x, node.y, node.width, node.height);
     card.getFill().setSolidFill('#FFFFFF');
-    
-    // [FIX] Correctly set border properties without chaining
     const border = card.getBorder();
     border.setWeight(1);
-    border.getLineFill().setSolidFill('#DADCE0'); // Google Grey
+    border.getLineFill().setSolidFill('#DADCE0');
 
-    // 2. Icon (Left aligned)
-    const iconSize = 32;
-    const margin = 12;
+    const iconSize = 32, margin = 12;
     try {
         if (iconUrl) {
             slide.insertImage(iconUrl, node.x + margin, node.y + (node.height - iconSize)/2, iconSize, iconSize);
         }
-    } catch (e) { /* Ignore missing icon */ }
+    } catch (e) { Logger.log(`Could not insert image for node ${node.id} from URL ${iconUrl}. Error: ${e.message}`); } 
 
-    // 3. Text Block
     const textX = node.x + iconSize + (margin * 2);
-    // [BUGFIX] Ensure text width is never negative, which can cause a "height should not be zero" error.
     const textW = Math.max(1, node.width - (iconSize + (margin * 3)));
     
-    // Title (Role/Label)
     if (typeof node.label === 'string' && node.label.trim().length > 0) {
-      const titleBox = slide.insertTextBox(node.label, textX, node.y + 12, textW, 20);
+      const titleBox = slide.insertTextBox(node.label, textX, node.y + 10, textW, 25); // Adjusted Y and Height
       const tStyle = titleBox.getText().getTextStyle();
       tStyle.setFontSize(9).setBold(true).setForegroundColor('#202124').setFontFamily('Arial');
       titleBox.getFill().setTransparent();
@@ -353,7 +323,7 @@ function drawNode(slide, node, iconUrl, productName) {
     
     // Subtitle (Product Name)
     if (typeof productName === 'string' && productName.trim().length > 0) {
-        const subBox = slide.insertTextBox(productName, textX, node.y + 32, textW, 20);
+        const subBox = slide.insertTextBox(productName, textX, node.y + 35, textW, 25); // Adjusted Y and Height
         const sStyle = subBox.getText().getTextStyle();
         sStyle.setFontSize(8).setBold(false).setForegroundColor('#5F6368').setFontFamily('Arial');
         subBox.getFill().setTransparent();
@@ -361,70 +331,80 @@ function drawNode(slide, node, iconUrl, productName) {
     }
 }
 
-function performRender(mermaidCode) {
-    const iconMap = getIconMap();
+/**
+ * Renders the full diagram on a new slide.
+ */
+function performRender(mermaidCode, iconMap) {
     const plan = generateLayoutFromMermaid(parseMermaid(mermaidCode), 720, 405);
-
-    if (!plan.entities || plan.entities.length === 0) {
-      throw new Error("Parsing failed: No entities found to render.");
-    }
+    if (!plan.entities || plan.entities.length === 0) throw new Error("Parsing failed: No entities found to render.");
 
     const pres = SlidesApp.getActivePresentation();
     const slide = pres.insertSlide(0, pres.getLayouts().find(l => l.getLayoutName() === 'BLANK') || pres.getLayouts()[0]);
     
-    // Draw Connections (Back)
+    // Pass 1: Draw Connections and Labels (based on original working code)
+    Logger.log("--- Starting v5.5.0 style Render ---");
+
     plan.connections.forEach(c => {
         const from = plan.entities.find(e => e.id === c.from);
         const to = plan.entities.find(e => e.id === c.to);
         if (from && to) {
-            let x1 = from.x + from.width; let y1 = from.y + from.height/2;
-            let x2 = to.x; let y2 = to.y + to.height/2;
-            
+            // Use the original, simple, right-to-left coordinate logic from v5.5.0
+            let x1 = from.x + from.width;
+            let y1 = from.y + from.height / 2;
+            let x2 = to.x;
+            let y2 = to.y + to.height / 2;
+
             if (to.x > from.x + 20) { x1 = from.x + from.width; x2 = to.x; }
-            
-            Logger.log(`Drawing line from (${x1}, ${y1}) to (${x2}, ${y2})`);
+
+            Logger.log(`v5.5.0-style: Drawing line for ${c.from} -> ${c.to} from (${x1},${y1}) to (${x2},${y2})`);
             const line = slide.insertLine(SlidesApp.LineCategory.STRAIGHT, x1, y1, x2, y2);
-            line.getLineFill().setSolidFill('#4284F3'); 
+            line.getLineFill().setSolidFill('#4284F3');
             line.setWeight(2);
             line.setEndArrow(SlidesApp.ArrowStyle.STEALTH_ARROW);
-            line.sendToBack();
-            
+            line.sendToBack(); // The original, working z-order call
+
             if (c.label && c.label.trim().length > 0) {
-                const midX = (x1 + x2) / 2; const midY = (y1 + y2) / 2;
-                const labelTb = slide.insertTextBox(c.label, midX - 30, midY - 10, 60, 20);
-                labelTb.getText().getTextStyle().setFontSize(7).setForegroundColor('#1967D2');
-                labelTb.getFill().setSolidFill('#FFFFFF');
+                const midX = (x1 + x2) / 2;
+                const midY = (y1 + y2) / 2;
+                const labelTb = slide.insertTextBox(c.label, midX - 50, midY - 15, 100, 30);
+                labelTb.getText().getTextStyle().setFontSize(7).setForegroundColor('#1967D1'); // Changed color slightly for contrast
+                labelTb.getFill().setTransparent(); // Make transparent
                 labelTb.getBorder().setTransparent();
             }
+        } else {
+            Logger.log(`v5.5.0-style: Could not find 'from' or 'to' node for connection: ${c.from}-->${c.to}`);
         }
     });
 
-    // Draw Nodes (Front)
+    // Pass 2: Draw Nodes (on top of connections and labels)
     plan.entities.forEach(e => {
-       const iconKey = CURRENT_ICON_ASSIGNMENTS[e.id] || 'default';
-       const iconEntry = iconMap[iconKey] || iconMap['default'];
+       const iconEntry = iconMap[e.icon] || iconMap['default'];
        const iconUrl = iconEntry ? iconEntry.url : FALLBACK_ICONS.GENERIC;
-       const productName = iconEntry ? (iconEntry.name || iconEntry.title || "") : "";
-       drawNode(slide, e, iconUrl, productName);
+       Logger.log(`v5.5.0-style: Drawing node ${e.id}`);
+       drawNode(slide, e, iconUrl);
     });
 }
 
+
+/**
+ * Main function called from UI to generate a diagram from a prompt.
+ */
 function generateDiagram(userPrompt, modelId, returnMarkupOnly) {
   const props = PropertiesService.getUserProperties();
   const projectId = props.getProperty('GCP_PROJECT_ID');
-  
   if (!projectId) return { success: false, message: 'Configuration missing: Project ID.' };
 
   try {
+    props.setProperty('LAST_PROMPT', userPrompt);
     CURRENT_ICON_ASSIGNMENTS = {};
     const iconMap = getIconMap();
     const mermaidCode = getMermaidCode(userPrompt, projectId, modelId, iconMap);
 
     if (returnMarkupOnly) {
-        return { success: true, mermaidCode: mermaidCode };
+        return { success: true, mermaidCode: mermaidCode, iconMap: CURRENT_ICON_ASSIGNMENTS };
     }
 
-    performRender(mermaidCode);
+    performRender(mermaidCode, iconMap);
     return { success: true, message: "Diagram generated successfully." };
   } catch (e) {
     Logger.log(`FATAL in generateDiagram: ${e.stack}`);
@@ -432,9 +412,18 @@ function generateDiagram(userPrompt, modelId, returnMarkupOnly) {
   }
 }
 
-function renderMermaid(mermaidCode) {
+/**
+ * Main function called from UI to render a diagram from existing Mermaid code.
+ */
+function renderMermaid(mermaidCode, iconMapJson) {
     try {
-        performRender(mermaidCode);
+        if (iconMapJson) {
+            CURRENT_ICON_ASSIGNMENTS = JSON.parse(iconMapJson);
+        } else {
+            CURRENT_ICON_ASSIGNMENTS = {};
+        }
+        const iconMap = getIconMap();
+        performRender(mermaidCode, iconMap);
         return { success: true, message: "Rendered successfully." };
     } catch (e) {
         Logger.log(`FATAL in renderMermaid: ${e.stack}`);
