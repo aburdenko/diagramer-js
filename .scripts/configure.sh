@@ -130,11 +130,13 @@ if [ -z "$PROJECT_ID" ]; then
   return 1
 fi
 
-echo "Setting active gcloud project to: $PROJECT_ID"
-gcloud config set project "$PROJECT_ID"
+# echo "Setting active gcloud project to: $PROJECT_ID"
+# gcloud config set project "$PROJECT_ID"
 
-# Get project number, which is needed for some service agent roles
-PROJECT_NUMBER=$(gcloud projects describe "$PROJECT_ID" --format="value(projectNumber)")
+if [ -z "$PROJECT_NUMBER" ]; then
+  # Get project number, which is needed for some service agent roles
+  PROJECT_NUMBER=$(gcloud projects describe "$PROJECT_ID" --format="value(projectNumber)")
+fi
 
 # --- Virtual Environment Setup ---
 if [ ! -d ".venv/python3.12" ]; then

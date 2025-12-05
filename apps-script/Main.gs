@@ -2,7 +2,7 @@
 // ADD-ON BOILERPLATE
 //==================================================================
 
-const SCRIPT_VERSION = "8.2.0"; // Final stable version with smaller cards
+const SCRIPT_VERSION = "8.2.1"; // Fix rendering bug and improve layout.
 
 function onOpen(e) {
   const menu = SlidesApp.getUi().createMenu('Diagram Generator');
@@ -12,8 +12,17 @@ function onOpen(e) {
     menu.addItem('Generate from Prompt', 'showSidebar');
     menu.addSeparator();
     menu.addItem('Configure...', 'showConfigDialog');
+    menu.addSeparator();
+    menu.addItem('Show User Info', 'showUserInfo');
   }
   menu.addToUi();
+}
+
+function showUserInfo() {
+  const activeUser = Session.getActiveUser().getEmail();
+  const effectiveUser = Session.getEffectiveUser().getEmail();
+  const message = `Active User (the one running the script): ${activeUser}\nEffective User (the one whose authorization is used): ${effectiveUser}`;
+  SlidesApp.getUi().alert('User Information', message, SlidesApp.getUi().ButtonSet.OK);
 }
 
 function showSidebar() {
@@ -55,11 +64,12 @@ function loadConfig() {
     lastPrompt: props.getProperty('LAST_PROMPT') || ''
   };
 }
-
+ // this is comment
 //==================================================================
 // CORE LOGIC
 //==================================================================
 
+const iconSize = 32, margin = 12, PADDING = 25, H_SPACING = 40, V_SPACING = 40;
 let CURRENT_ICON_ASSIGNMENTS = {};
 const ICON_MAP_URL = "https://storage.googleapis.com/icon-map/icon_map.json";
 
@@ -212,13 +222,56 @@ function parseMermaid(mermaidCode) {
 /**
  * Calculates node positions for the diagram.
  */
-function generateLayoutFromMermaid(parsedData, slideWidth, slideHeight) {
-  Logger.log(`generateLayoutFromMermaid START: Generating layout for ${parsedData.entities.length} entities.`);
+function generateLayoutFromMermaid(parsedData, slideWidth, slideHeight, iconMap) {
+  Logger.log(`generateLayoutFromMermaid START (v9): Simplified grid layout with wrapping.`);
   const { entities, connections } = parsedData;
-  const CARD_W = 140, CARD_H = 60; // Using smaller cards
-  
+
+  const DEFAULT_CARD_W = 140, DEFAULT_CARD_H = 60;
+
+
   const nodes = {};
-  entities.forEach(e => nodes[e.id] = { ...e, children: [], parents: [], level: 0, x:0, y:0, width: CARD_W, height: CARD_H });
+  const calculateTextWidth = (text, fontSize) => {
+    if (!text) return 0;
+    const charWidth = fontSize === 9 ? 6 : 5; // Approximation: 6px per char for size 9, 5px for size 8
+    return text.length * charWidth;
+  };
+
+  entities.forEach(e => nodes[e.id] = { ...e, children: [], parents: [], level: 0, x:0, y:0, width: DEFAULT_CARD_W, height: DEFAULT_CARD_H });
+
+  for (const nodeId in nodes) {
+    const node = nodes[nodeId];
+    const iconEntry = iconMap[node.icon] || iconMap['default'];
+    const productName = iconEntry ? (iconEntry.name || '') : '';
+
+    // Calculate text widths
+    const labelWidth = calculateTextWidth(node.label, 9); // Font size 9 for label
+    const productNameWidth = calculateTextWidth(productName, 8); // Font size 8 for product name
+
+    // Calculate required content width (text + padding)
+    let requiredTextWidth = Math.max(labelWidth, productNameWidth);
+    
+    // Add space for icon if present
+    let contentWidth = requiredTextWidth + (iconEntry && iconEntry.url ? iconSize + margin : 0);
+    
+    // Add margins for left and right of content
+    node.width = Math.max(DEFAULT_CARD_W, contentWidth + (margin * 2));
+
+    // Calculate required height
+    let requiredHeight = 0;
+    if (node.label && productName) {
+        requiredHeight = 25 + 25; // Height for two lines of text (label and product name)
+    } else if (node.label || productName) {
+        requiredHeight = 25; // Height for one line of text
+    }
+    
+    node.height = Math.max(DEFAULT_CARD_H, requiredHeight + (margin * 2)); // Add top and bottom margins
+  }
+
+  Logger.log('Calculated Node Dimensions:');
+  for (const nodeId in nodes) {
+    const node = nodes[nodeId];
+    Logger.log(`- Node '${node.id}': width=${node.width}, height=${node.height}`);
+  }
   
   connections.forEach(c => {
     if (nodes[c.from] && nodes[c.to]) {
@@ -227,7 +280,7 @@ function generateLayoutFromMermaid(parsedData, slideWidth, slideHeight) {
     }
   });
 
-  // Simple hierarchical assignment from original version
+  // Level calculation (same as before)
   for (let i = 0; i < 20; i++) {
       let changed = false;
       for (const id in nodes) {
@@ -248,36 +301,56 @@ function generateLayoutFromMermaid(parsedData, slideWidth, slideHeight) {
     if (!levels[nodes[id].level]) levels[nodes[id].level] = [];
     levels[nodes[id].level].push(nodes[id]);
   }
-
   const uniqueLevels = Object.keys(levels).map(Number).sort((a,b) => a-b);
-  const numColumns = uniqueLevels.length;
+  
+  // New simplified grid-based layout logic
+  let x = PADDING;
+  let y = PADDING;
+  let rowMaxHeight = 0;
 
-  if (numColumns > 0) {
-      // Dynamic spacing calculation that fits to slide width
-      const availableWidth = slideWidth - 100; // 50px margin on each side
-      const hSpacing = (numColumns > 1) ? (availableWidth - (numColumns * CARD_W)) / (numColumns - 1) : 0;
+  uniqueLevels.forEach(level => {
+      const levelNodes = levels[level];
       
-      const totalWidth = (numColumns * CARD_W) + Math.max(0, numColumns - 1) * hSpacing;
-      const startX = (slideWidth - totalWidth) / 2;
+      // Start each new logical level on a new row.
+      x = PADDING;
+      if (rowMaxHeight > 0) { // Don't add space before the very first row
+          y += rowMaxHeight + V_SPACING;
+      }
+      rowMaxHeight = 0;
 
-      uniqueLevels.forEach((level, colIndex) => {
-          const levelNodes = levels[level];
-          const availableHeight = slideHeight - 100; // 50px margin
-          const vSpacing = (levelNodes.length > 1) ? (availableHeight - (levelNodes.length * CARD_H)) / (levelNodes.length - 1) : 0;
-          const totalHeight = (levelNodes.length * CARD_H) + Math.max(0, levelNodes.length - 1) * vSpacing;
-          let currentY = (slideHeight - totalHeight) / 2;
-          const currentX = startX + colIndex * (CARD_W + hSpacing);
-          
-          levelNodes.forEach((node) => {
-              node.x = currentX;
-              node.y = currentY;
-              currentY += CARD_H + vSpacing;
-          });
+      levelNodes.forEach(node => {
+          // If the current node doesn't fit, wrap to the next line
+          if (x + node.width > slideWidth - PADDING) {
+              x = PADDING;
+              y += rowMaxHeight + V_SPACING;
+              rowMaxHeight = 0;
+          }
+          node.x = x;
+          node.y = y;
+          x += node.width + H_SPACING;
+
+          if (node.height > rowMaxHeight) {
+              rowMaxHeight = node.height;
+          }
       });
-  }
+  });
+
   const layoutResult = { entities: Object.values(nodes), connections };
-  Logger.log(`generateLayoutFromMermaid END: Layout calculation complete.`);
+  Logger.log(`generateLayoutFromMermaid END (v9).`);
   return layoutResult;
+}
+
+/**
+ * Gets the attachment points for a node.
+ */
+function getCardAttachmentPoints(node) {
+  const centerX = node.x + node.width / 2;
+  const centerY = node.y + node.height / 2;
+  return {
+    center: { x: centerX, y: centerY }, left: { x: node.x, y: centerY },
+    right: { x: node.x + node.width, y: centerY }, top: { x: centerX, y: node.y },
+    bottom: { x: centerX, y: node.y + node.height }
+  };
 }
 
 /**
@@ -296,34 +369,41 @@ function getCardAttachmentPoints(node) {
 /**
  * Draws a single node on the slide.
  */
-function drawNode(slide, node, iconUrl) {
+function drawNode(slide, node, iconUrl, productName) {
     const card = slide.insertShape(SlidesApp.ShapeType.ROUND_RECTANGLE, node.x, node.y, node.width, node.height);
     card.getFill().setSolidFill('#FFFFFF');
     const border = card.getBorder();
     border.setWeight(1);
     border.getLineFill().setSolidFill('#DADCE0');
 
-    const iconSize = 32, margin = 12;
-    try {
-        if (iconUrl) {
-            slide.insertImage(iconUrl, node.x + margin, node.y + (node.height - iconSize)/2, iconSize, iconSize);
-        }
-    } catch (e) { Logger.log(`Could not insert image for node ${node.id} from URL ${iconUrl}. Error: ${e.message}`); } 
+    let textX = node.x + margin;
+    let textW;
 
-    const textX = node.x + iconSize + (margin * 2);
-    const textW = Math.max(1, node.width - (iconSize + (margin * 3)));
-    
-    if (typeof node.label === 'string' && node.label.trim().length > 0) {
-      const titleBox = slide.insertTextBox(node.label, textX, node.y + 10, textW, 25); // Adjusted Y and Height
-      const tStyle = titleBox.getText().getTextStyle();
-      tStyle.setFontSize(9).setBold(true).setForegroundColor('#202124').setFontFamily('Arial');
-      titleBox.getFill().setTransparent();
-      titleBox.getBorder().setTransparent();
+    if (iconUrl) {
+        try {
+            slide.insertImage(iconUrl, node.x + margin, node.y + (node.height - iconSize) / 2, iconSize, iconSize);
+            textX = node.x + iconSize + (margin * 2);
+            textW = Math.max(1, node.width - (iconSize + (margin * 3)));
+        } catch (e) {
+            Logger.log(`Could not insert image for node ${node.id} from URL ${iconUrl}. Error: ${e.message}`);
+            textW = Math.max(1, node.width - (margin * 2));
+        }
+    } else {
+        textW = Math.max(1, node.width - (margin * 2));
     }
-    
-    // Subtitle (Product Name)
+
+    const textY = node.y + (node.height - 50) / 2; // Center text vertically
+
+    if (typeof node.label === 'string' && node.label.trim().length > 0) {
+        const titleBox = slide.insertTextBox(node.label, textX, textY + 10, textW, 25);
+        const tStyle = titleBox.getText().getTextStyle();
+        tStyle.setFontSize(9).setBold(true).setForegroundColor('#202124').setFontFamily('Arial');
+        titleBox.getFill().setTransparent();
+        titleBox.getBorder().setTransparent();
+    }
+
     if (typeof productName === 'string' && productName.trim().length > 0) {
-        const subBox = slide.insertTextBox(productName, textX, node.y + 35, textW, 25); // Adjusted Y and Height
+        const subBox = slide.insertTextBox(productName, textX, textY + 35, textW, 25);
         const sStyle = subBox.getText().getTextStyle();
         sStyle.setFontSize(8).setBold(false).setForegroundColor('#5F6368').setFontFamily('Arial');
         subBox.getFill().setTransparent();
@@ -335,53 +415,68 @@ function drawNode(slide, node, iconUrl) {
  * Renders the full diagram on a new slide.
  */
 function performRender(mermaidCode, iconMap) {
-    const plan = generateLayoutFromMermaid(parseMermaid(mermaidCode), 720, 405);
+    const parsedData = parseMermaid(mermaidCode);
+    const plan = generateLayoutFromMermaid(parsedData, 720, 405, iconMap);
     if (!plan.entities || plan.entities.length === 0) throw new Error("Parsing failed: No entities found to render.");
 
     const pres = SlidesApp.getActivePresentation();
     const slide = pres.insertSlide(0, pres.getLayouts().find(l => l.getLayoutName() === 'BLANK') || pres.getLayouts()[0]);
     
-    // Pass 1: Draw Connections and Labels (based on original working code)
-    Logger.log("--- Starting v5.5.0 style Render ---");
 
+    // Pass 1: Draw Connections
     plan.connections.forEach(c => {
         const from = plan.entities.find(e => e.id === c.from);
         const to = plan.entities.find(e => e.id === c.to);
         if (from && to) {
-            // Use the original, simple, right-to-left coordinate logic from v5.5.0
-            let x1 = from.x + from.width;
-            let y1 = from.y + from.height / 2;
-            let x2 = to.x;
-            let y2 = to.y + to.height / 2;
+            const fromPoints = getCardAttachmentPoints(from);
+            const toPoints = getCardAttachmentPoints(to);
 
-            if (to.x > from.x + 20) { x1 = from.x + from.width; x2 = to.x; }
+            let bestFromPoint = fromPoints.right;
+            let bestToPoint = toPoints.left;
+            let minDistance = Number.MAX_VALUE;
 
-            Logger.log(`v5.5.0-style: Drawing line for ${c.from} -> ${c.to} from (${x1},${y1}) to (${x2},${y2})`);
+            const fromPointArray = [fromPoints.left, fromPoints.right, fromPoints.top, fromPoints.bottom];
+            const toPointArray = [toPoints.left, toPoints.right, toPoints.top, toPoints.bottom];
+
+            for (const p1 of fromPointArray) {
+                for (const p2 of toPointArray) {
+                    const distance = Math.sqrt(Math.pow(p1.x - p2.x, 2) + Math.pow(p1.y - p2.y, 2));
+                    if (distance < minDistance) {
+                        minDistance = distance;
+                        bestFromPoint = p1;
+                        bestToPoint = p2;
+                    }
+                }
+            }
+            
+            const x1 = bestFromPoint.x;
+            const y1 = bestFromPoint.y;
+            const x2 = bestToPoint.x;
+            const y2 = bestToPoint.y;
+
             const line = slide.insertLine(SlidesApp.LineCategory.STRAIGHT, x1, y1, x2, y2);
             line.getLineFill().setSolidFill('#4284F3');
             line.setWeight(2);
             line.setEndArrow(SlidesApp.ArrowStyle.STEALTH_ARROW);
-            line.sendToBack(); // The original, working z-order call
+            line.sendToBack();
 
             if (c.label && c.label.trim().length > 0) {
                 const midX = (x1 + x2) / 2;
                 const midY = (y1 + y2) / 2;
                 const labelTb = slide.insertTextBox(c.label, midX - 50, midY - 15, 100, 30);
-                labelTb.getText().getTextStyle().setFontSize(7).setForegroundColor('#1967D1'); // Changed color slightly for contrast
-                labelTb.getFill().setTransparent(); // Make transparent
+                labelTb.getText().getTextStyle().setFontSize(7).setForegroundColor('#1967D1');
+                labelTb.getFill().setTransparent();
                 labelTb.getBorder().setTransparent();
             }
-        } else {
-            Logger.log(`v5.5.0-style: Could not find 'from' or 'to' node for connection: ${c.from}-->${c.to}`);
         }
     });
 
-    // Pass 2: Draw Nodes (on top of connections and labels)
+    // Pass 2: Draw Nodes
     plan.entities.forEach(e => {
        const iconEntry = iconMap[e.icon] || iconMap['default'];
+       const productName = iconEntry ? (iconEntry.name || '') : '';
        const iconUrl = iconEntry ? iconEntry.url : FALLBACK_ICONS.GENERIC;
-       Logger.log(`v5.5.0-style: Drawing node ${e.id}`);
-       drawNode(slide, e, iconUrl);
+       drawNode(slide, e, iconUrl, productName);
     });
 }
 
